@@ -1,6 +1,6 @@
 import asyncio
 
-from test_key import KEY
+from tests.test_key import KEY
 from encoding import encode_list, decode_list
 from encryption import encrypt_bytes, decrypt_bytes
 from errorcodes import *

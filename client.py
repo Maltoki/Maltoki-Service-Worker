@@ -5,12 +5,19 @@ import socket
 
 import threading
 from abc import ABC, abstractmethod
+from typing import Any
 
 from encryption import decrypt_bytes, encrypt_bytes
 from errorcodes import *
 
-class Client(ABC):
+from typing import TypeVar, Generic
+
+CLI_ARGS = TypeVar("CLI_ARGS")
+
+class Client(ABC, Generic[CLI_ARGS]):
     client_type:bytes = None
+
+    cli_args:CLI_ARGS|None = None
 
     def __init__(self, enc_key:bytes, host:str, port:int, time_out:int = 1):
         if not self.client_type:
@@ -50,10 +57,8 @@ class Client(ABC):
 
         
         plain_text = decrypt_bytes(encrypted_incomming, self.enc_key)
-        print(plain_text)
+                
         decoded_result = json.loads(plain_text)
-
-        print(decoded_result)
 
         return decoded_result
     
@@ -84,7 +89,11 @@ class Client(ABC):
     @abstractmethod
     def handle_workload(self, incoming:list|dict|int|float|str|bool|None) -> list|dict:
         """
-        Return value should be json serializeable
+        # Requirements
+
+         - This function should also validate the incoming data to make sure it follows the correct schema.  Use Pydantic.
+
+         - Return value should be json serializeable
         """
         pass
 
@@ -93,17 +102,26 @@ class Client(ABC):
             # Only a single separate thread should ever run at once since its only for io parrallelism anyways
             self.start_task()
 
+    def before_connect(self):
+        pass
+
     def start(self):
+        self.before_connect()
         self.connect()
         self.main_loop()
 
-def run_client(client_class:type[Client], key_path:Path|None = None):
-    parser = argparse.ArgumentParser("Test Client")
+def run_client(client_class:type[Client], key_path:Path|None = None, **kwargs:dict[str, tuple[type, str]]):
+    parser = argparse.ArgumentParser(client_class.client_type)
     parser.add_argument("host", type=str, help="The server hostname/IP.")
     parser.add_argument("port", type=int, help="The server port.")
     parser.add_argument("--key", type=Path, help="The path to the encryption key.", default=key_path if key_path else Path("./key.key"))
+    for key, val in kwargs.items():
+        t, desc = val
+        parser.add_argument(f"--{key}", type=t, help=desc, default=None)
+
 
     args = parser.parse_args()
-
+    
     client = client_class(args.key.read_bytes(), args.host, args.port)
+    client.cli_args = vars(args)
     client.start()
