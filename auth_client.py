@@ -98,13 +98,15 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         cursor = self.sql_conn.cursor()
         cursor.execute("SELECT 1 FROM credential WHERE email = ? AND password = ? LIMIT 1", (email, password_hash))
         valid = cursor.fetchone() is not None
+        self.sql_conn.commit()
         cursor.close()
         return valid
     
-    def sql_get_account_id(self, email:str, password_hash:str|bytes) -> int:
+    def sql_get_account_id(self, email:str, password_hash:str|bytes) -> int|None:
         cursor = self.sql_conn.cursor()
         cursor.execute("SELECT id FROM credential WHERE email = ? AND password = ? LIMIT 1", (email, password_hash))
         id = cursor.fetchone()
+        self.sql_conn.commit()
         cursor.close()
         if id:
             return id
@@ -113,6 +115,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         cursor = self.sql_conn.cursor()
         cursor.execute("SELECT 1 FROM credential WHERE email = ? LIMIT 1", email)
         valid = cursor.fetchone() is not None
+        self.sql_conn.commit()
         cursor.close()
         return valid
     
@@ -120,6 +123,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         cursor = self.sql_conn.cursor()
         cursor.execute("SELECT 1 FROM refresh_token WHERE token = ? LIMIT 1", token)
         valid = cursor.fetchone() is not None
+        self.sql_conn.commit()
         cursor.close()
         return valid
     
@@ -131,6 +135,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
             ON CONFLICT(credential_id) DO UPDATE SET
                 token = excluded.token;
         """, (token, id))
+        self.sql_conn.commit()
         cursor.close()
         return token
 
@@ -139,6 +144,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         cursor = self.sql_conn.cursor()
         cursor.execute("SELECT 1 FROM api_key WHERE key = ? LIMIT 1", key)
         valid = cursor.fetchone() is not None
+        self.sql_conn.commit()
         cursor.close()
         return valid
     
@@ -147,22 +153,42 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         cursor = self.sql_conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM api_key")
         num_keys = cursor.fetchone()[0]
-        cursor.close()
 
         now_dt = datetime.datetime.now()
 
         api_key = hash_s256(f"{API_KEY_SALT}{num_keys}{credential_id}{now_dt.hour}{now_dt.microsecond}{now_dt.day}{now_dt.year}{now_dt.month}{now_dt.minute}")
 
-        cursor = self.sql_conn.cursor()
         cursor.execute("""
             INSERT INTO api_key (credential_id, key) VALUES (?, ?)
             ON CONFLICT(credential_id) DO UPDATE SET
                 key = excluded.key;
             """, (credential_id, api_key))
+        
+
+        self.sql_conn.commit()
         cursor.close()
         
         return api_key.decode()
+    
+    def sql_register_account(self, email:str, password:str, DOB:datetime.date, first_name:str, last_name:str):
 
+        # TODO
+        
+        cursor = self.sql_conn.cursor()
+        cursor.execute("INSERT INTO credential (email, password) VALUES (?, ?)", (email, password))
+
+        
+        try:
+            cursor.execute("INSERT INTO user (id, date_of_birth, first_name, last_name) SELECT id, ?, ?, ? FROM credential WHERE email = ? and password = ?", (DOB, first_name, last_name, email, password))
+        except sqlite3.Error:
+            cursor.execute("DELETE FROM credential WHERE email = ? and password = ?", (email, password))
+            self.sql_conn.commit()
+            cursor.close()
+            raise sqlite3.Error
+        
+        self.sql_conn.commit()
+        cursor.close()
+        
     # END SQL QUERIES
 
     def before_connect(self):
@@ -174,6 +200,17 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email VARCHAR(30) UNIQUE,
             password CHAR(64)  -- SHA-256 hashes are 64 hex characters
+        );
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            credential_id INTEGER UNIQUE,
+            date_of_birth DATE,
+            first_name CHAR(30),
+            last_name CHAR(30),
+            FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE ON UPDATE CASCADE
         );
         """)
 
@@ -192,17 +229,6 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
             credential_id INTEGER UNIQUE,
             key CHAR(64) UNIQUE,
             FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE ON UPDATE CASCADE           
-        );
-        """)
-
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            credential_id INTEGER UNIQUE,
-            date_of_birth DATE,
-            first_name CHAR(30),
-            last_name CHAR(30),
-            FOREIGN KEY (credential_id) REFERENCES credential(id) ON DELETE CASCADE ON UPDATE CASCADE
         );
         """)
 
@@ -276,6 +302,13 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
     @service_type("register")
     def register(self, data:dict[str, Any]):
         EMAIL = data["email"]
+        F_NAME:str = data["first_name"]
+        L_NAME:str = data["last_name"]
+
+        if not F_NAME.isalpha() or \
+        not L_NAME.isalpha() or \
+        len(F_NAME) < 1 or len(L_NAME) < 1:
+            raise InvalidSubmission("First and Last name should be provided and must only use letters.")
 
         if not is_valid_email(EMAIL):
             raise InvalidSubmission("Not a valid email.")
@@ -301,6 +334,8 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         
         if not is_valid_password(PASSWORD):
             raise AuthFailed("Password must be at least 12 characters, contain at least 3 digits, at least 1 capital letter and at least 1 symbol.")
+
+        self.sql_register_account(EMAIL, PASSWORD, DOB, F_NAME, L_NAME)
 
         return create_response(success=True)
     
