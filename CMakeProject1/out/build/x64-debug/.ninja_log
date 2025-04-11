@@ -1,0 +1,5 @@
+# ninja log v6
+14	186	7660292790102259	build.ninja	6b47faa41a80793c
+18	211	7660292790102259	build.ninja	6b47faa41a80793c
+31	769	7660292791406717	CMakeProject1/CMakeFiles/CMakeProject1.dir/CMakeProject1.cpp.obj	c5badcca1a17c422
+770	1074	7660292798794166	CMakeProject1/CMakeProject1.exe	fd732868a4ff7cd4

@@ -111,7 +111,7 @@ class Client(ABC, Generic[CLI_ARGS]):
         self.main_loop()
 
 def run_client(client_class:type[Client], key_path:Path|None = None, **kwargs:dict[str, tuple[type, str]]):
-    parser = argparse.ArgumentParser(client_class.client_type)
+    parser = argparse.ArgumentParser(client_class.client_type.decode())
     parser.add_argument("host", type=str, help="The server hostname/IP.")
     parser.add_argument("port", type=int, help="The server port.")
     parser.add_argument("--key", type=Path, help="The path to the encryption key.", default=key_path if key_path else Path("./key.key"))

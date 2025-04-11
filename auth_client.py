@@ -1,11 +1,11 @@
+from __future__ import annotations
 import datetime
+from functools import wraps
 import re
 from typing import Any, Callable, Literal
 from client import Client, run_client
 from tests.test_key import KEY
 import time
-import argparse
-from pathlib import Path
 import hashlib
 import hmac
 from dotenv import load_dotenv
@@ -76,7 +76,9 @@ PASSWORD_REGEX = re.compile(
 def is_valid_email(email:str) -> bool:
     return bool(EMAIL_REGEX.match(email))
 
-def is_valid_password(password:str) -> bool:
+def is_valid_password(password:str|bytes) -> bool:
+    if isinstance(password, bytes):
+        password = password.decode()
     return bool(PASSWORD_REGEX.match(password))
 
 def create_response(success:bool = True, **kwargs:dict[str, Any]) -> dict:
@@ -85,13 +87,34 @@ def create_response(success:bool = True, **kwargs:dict[str, Any]) -> dict:
         **kwargs
     }
 
-class AccountClient(Client[dict[Literal["db_path"], str]]):
-    client_type = b"Account"
-    
+def service_type(s_type:str):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, full_data:dict[str, Any]):
+            return func(self, full_data["data"])
+        wrapper._s_type = s_type
+        return wrapper
+    return decorator
 
+class ServiceBase:
     services:dict[str, Callable] = {}
     available_services:set[str] = set()
 
+    def __init_subclass__(cls):
+        super().__init_subclass__()
+        cls.available_services:set[str] = set()
+        cls.services:dict[str, Callable] = {}
+
+        for name, method in cls.__dict__.items():
+            if hasattr(method, "_s_type"):
+                key = method._s_type
+                cls.available_services.add(key)
+                cls.services[key] = method
+
+
+class AccountClient(Client[dict[Literal["db_path"], str]], ServiceBase):
+    client_type = b"Auth"
+    
     # SQL QUERIES
 
     def sql_account_exists(self, email:str, password_hash:str|bytes) -> bool:
@@ -109,11 +132,11 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         self.sql_conn.commit()
         cursor.close()
         if id:
-            return id
+            return id[0]
     
     def sql_email_exists(self, email:str) -> bool:
         cursor = self.sql_conn.cursor()
-        cursor.execute("SELECT 1 FROM credential WHERE email = ? LIMIT 1", email)
+        cursor.execute("SELECT 1 FROM credential WHERE email = ? LIMIT 1", (email,))
         valid = cursor.fetchone() is not None
         self.sql_conn.commit()
         cursor.close()
@@ -142,7 +165,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
     
     def sql_verify_api_key(self, key:str|bytes) -> bool:
         cursor = self.sql_conn.cursor()
-        cursor.execute("SELECT 1 FROM api_key WHERE key = ? LIMIT 1", key)
+        cursor.execute("SELECT 1 FROM api_key WHERE key = ? LIMIT 1", (key,))
         valid = cursor.fetchone() is not None
         self.sql_conn.commit()
         cursor.close()
@@ -235,15 +258,6 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         cursor.close()
         
         self.sql_conn.commit()
-
-    def service_type(self, s_type:str):
-        def decorator(func):
-            def wrapper(full_data:dict[str, Any]):
-                return func(full_data["data"])
-            self.available_services.add(s_type)
-            self.services[s_type] = wrapper
-            return wrapper
-        return decorator
     
     def create_access_token(self, user_id: int|str) -> str:
         payload = {"sub": str(user_id), "exp": time.time() + ACCESS_EXPIRE}
@@ -317,7 +331,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
             raise InvalidSubmission("Account already exists.")
         
         try:
-            DOB = datetime.strptime(data["DOB"], "%Y-%m-%d").date()
+            DOB = datetime.datetime.strptime(data["DOB"], "%Y-%m-%d").date()
             today_date = datetime.date.today()
             if DOB > datetime.date(today_date.year - 13, today_date.month, today_date.day):
                 # Under 13 years old
@@ -325,15 +339,15 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         except ValueError:
             # incorrect format (this should never trigger unless someone is spoofing the frontend)
             raise InvalidSubmission("Bad date of birth format.")
-        
+
+        if not is_valid_password(data["password"]):
+            raise AuthFailed("Password must be at least 12 characters, contain at least 3 digits, at least 1 capital letter and at least 1 symbol.")
+
         PASSWORD = hash_s256(data["password"])
         RE_PASSWORD = hash_s256(data["re-password"])
 
         if PASSWORD != RE_PASSWORD:
             raise AuthFailed("Passwords do not match.")
-        
-        if not is_valid_password(PASSWORD):
-            raise AuthFailed("Password must be at least 12 characters, contain at least 3 digits, at least 1 capital letter and at least 1 symbol.")
 
         self.sql_register_account(EMAIL, PASSWORD, DOB, F_NAME, L_NAME)
 
@@ -362,16 +376,19 @@ class AccountClient(Client[dict[Literal["db_path"], str]]):
         outgoing = create_response(success=False, error="Authorization failed.")
         try:
             req_service = incoming["service"]
+            print(req_service, "in", self.available_services)
             if req_service in self.available_services:
-                outgoing = self.services[req_service](incoming)
+                outgoing = self.services[req_service](self, incoming)
             else:
                 raise AuthFailed("Malformed authorization request.")
         except AuthFailed as e:
-            return {"error":e.msg, "success":False}
+            outgoing = {"error":e.msg, "success":False}
         except InvalidSubmission as e:
-            return {"error":e.msg, "success":False}
-        except Exception:
-            return {"error":"Malformed authorization request.", "success":False}
+            outgoing = {"error":e.msg, "success":False}
+        # except Exception as e:
+        #     print(e)
+        #     outgoing = {"error":"Malformed authorization request.", "success":False}
+        print(outgoing)
         return outgoing
     
 if __name__ == "__main__":
