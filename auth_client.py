@@ -54,13 +54,14 @@ class InvalidSubmission(Exception):
 
 def hash_s256(input_string:bytes|str):
     hmac_hash = hmac.new(HMAC_KEY, (input_string if isinstance(input_string, bytes) else input_string.encode()) + SALT, hashlib.sha256)
-    return hmac_hash.digest()
+    return hmac_hash.hexdigest()
 
 def verify_jwt(token:str, secret:str):
     try:
-        return jwt.decode(token, secret, algorithm="HS256")
+        return jwt.decode(token, secret, algorithms="HS256")
         # TODO Verify payload with database
-    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError) as e:
+        print(e)
         raise AuthFailed
     
 EMAIL_REGEX = re.compile(
@@ -144,7 +145,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]], ServiceBase):
     
     def sql_verify_refresh_token(self, token:str|bytes) -> bool:
         cursor = self.sql_conn.cursor()
-        cursor.execute("SELECT 1 FROM refresh_token WHERE token = ? LIMIT 1", token)
+        cursor.execute("SELECT 1 FROM refresh_token WHERE token = ? LIMIT 1", (token,))
         valid = cursor.fetchone() is not None
         self.sql_conn.commit()
         cursor.close()
@@ -191,7 +192,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]], ServiceBase):
         self.sql_conn.commit()
         cursor.close()
         
-        return api_key.decode()
+        return api_key
     
     def sql_register_account(self, email:str, password:str, DOB:datetime.date, first_name:str, last_name:str):
 
@@ -271,9 +272,7 @@ class AccountClient(Client[dict[Literal["db_path"], str]], ServiceBase):
 
     def verify_refresh_token(self, token:str):
         try:
-            # Verify that the token is a valid JWT token
-            verify_jwt(token, JWT_REFRESH_SECRET)
-            
+            # Verify that the token is a valid JWT refresh token
             return self.sql_verify_refresh_token(token)
         except jwt.ExpiredSignatureError:
             raise False
@@ -299,11 +298,27 @@ class AccountClient(Client[dict[Literal["db_path"], str]], ServiceBase):
     def refresh_login(self, data:dict[str, Any]):
         ACCOUNT_JWT = data["refresh_token"]
 
-        payload = self.verify_refresh_token(ACCOUNT_JWT)
+        if not self.verify_refresh_token(ACCOUNT_JWT):
+            raise AuthFailed
+
+        payload = verify_jwt(ACCOUNT_JWT, JWT_REFRESH_SECRET)
 
         ID = payload["sub"]
 
         return create_response(access_token = self.create_access_token(ID), refresh_token = self.create_refresh_token(ID))
+    
+    @service_type("refresh_access")
+    def refresh_access(self, data:dict[str, Any]):
+        ACCOUNT_JWT = data["refresh_token"]
+
+        if not self.verify_refresh_token(ACCOUNT_JWT):
+            raise AuthFailed
+
+        payload = verify_jwt(ACCOUNT_JWT, JWT_REFRESH_SECRET)
+
+        ID = payload["sub"]
+
+        return create_response(access_token = self.create_access_token(ID))
     
     @service_type("verify_account")
     def verify_account(self, data:dict[str, Any]):
@@ -363,10 +378,13 @@ class AccountClient(Client[dict[Literal["db_path"], str]], ServiceBase):
     @service_type("generate_API_key")
     def generate_api_key(self, data:dict[str, Any]):
         ACCOUNT_JWT = data["access_token"]
-
+        print("VERIFY JWT")
         payload = verify_jwt(ACCOUNT_JWT, JWT_KEY)
+        print("GET ID")
 
         ID = payload["sub"]
+
+        print("Create API key.")
 
         api_key = self.sql_create_api_key(ID)
 
